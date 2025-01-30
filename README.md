@@ -26,3 +26,7 @@ ResNet18        |   Resnet_trainer_student_DKD_LP.py    |      common feature le
 ResNet18        |   Resnet_trainer_student_DKD_REDL.py    |      common feature learning + DKD + REDL  
 ResNet18        |   Resnet_trainer_student_DKD_SA.py    |      common feature learning + DKD + ShallowAlign  
 ResNet18        |   Resnet_trainer_student_DKD_SPP.py    |      common feature learning + DKD + SPP  
+
+去掉了数据预处理中的以下操作:   
+transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened], p=0.8),  
+transforms.RandomGrayscale(p=0.2),  
