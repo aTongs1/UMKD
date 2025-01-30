@@ -37,15 +37,6 @@ alpha = 1
 beta = 8
 temperature = 4
 
-# 计算熵（不确定性正则化）
-def compute_entropy(probabilities):
-    # 计算每个样本的熵
-    return -torch.sum(probabilities * torch.log(probabilities + 1e-6), dim=1)  # 加上一个小常数避免log(0)
-# 熵正则化项
-def entropy_regularization(probabilities, lambda_entropy=0.1):
-    entropy = compute_entropy(probabilities)
-    return lambda_entropy * torch.mean(entropy)
-
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/data')
@@ -90,9 +81,7 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, model, cfl_blk, teach
             #print('t1_out:', t1_out[:10])
             #print('t2_out:', t2_out[:10])
             # t_outs = torch.cat((t1_out, t2_out), dim=1)
-            # 使用 torch.stack 合并张量，形状为 2x5
             # stacked_output = torch.stack((t1_out, t2_out), dim=0)
-            # 求沿第0维的均值，得到形状为 1x5 的张量
             # t_outs = torch.mean(stacked_output, dim=0)
             # t_outs = F.softmax(t_outs, dim=1)
             stacked_output = torch.stack((patch_score_t1, patch_score_t2), dim=0)
@@ -116,7 +105,6 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, model, cfl_blk, teach
         # entropy_loss = entropy_regularization(t_outs)
         loss_1 = criterion(s_outs, labels)  #输出与真实标签之间计算损失
         # loss_ce = criterion_ce(s_outs, t_outs) #软目标损失
-########将损失替换为SHIKE_DKD_loss#######
         # loss_tckd, loss_nckds = dkd_loss(s_outs, t_outs, labels, alpha, beta, temperature)
         # loss_ce = loss_tckd + loss_nckds
 ########将损失替换为SDD_DKD_loss#######
