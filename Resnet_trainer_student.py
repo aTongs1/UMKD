@@ -104,16 +104,11 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, model, cfl_blk, teach
 
         (hs, ht), (ft_, ft) = cfl_blk(fs, ft)
 
-        # 计算熵正则化项
-        # entropy_loss = entropy_regularization(t_outs)
-        # loss_1 = criterion(s_outs, labels)  #输出与真实标签之间计算损失
+        loss_1 = criterion(s_outs, labels)  #输出与真实标签之间计算损失
         loss_ce = criterion_ce(s_outs, t_outs) #软目标损失
-########将损失替换为SHIKE_DKD_loss#######
-        # loss_ce = dkd_no_labels_loss(s_outs, t_outs, alpha, beta, temperature)
         loss_cf = 10*criterion_cf(hs, ht, ft_, ft) #MMD和重构损失
         
-        loss = loss_ce + loss_cf
-        #loss = loss_1 + loss_ce + loss_cf
+        loss = loss_1 + loss_ce + loss_cf
         loss.backward()
         optim.step()
 
@@ -195,10 +190,10 @@ def main():
     tran = transforms.Compose([
             transforms.Resize((256, 256), interpolation=InterpolationMode.BILINEAR),
             transforms.RandomResizedCrop(224, scale=(0.08, 1.)),
-            transforms.RandomApply([
-                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
+            # transforms.RandomApply([
+            #     transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            # ], p=0.8),
+            # transforms.RandomGrayscale(p=0.2),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
