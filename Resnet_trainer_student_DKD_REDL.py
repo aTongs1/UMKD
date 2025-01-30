@@ -1,0 +1,420 @@
+#######################
+#两个resnet50蒸馏给学生18
+#######################
+import random
+import os, sys
+import numpy as np
+from tqdm import tqdm
+import argparse
+
+import torch
+import torch.nn as nn
+from torch.utils import data
+
+from loss import SoftCELoss, CFLoss_UC, CFLoss
+from utils.stream_metrics import StreamClsMetrics, AverageMeter
+from utils.metric import *
+from models.cfl import CFL_ConvBlock
+from datasets import StanfordDogs, CUB200, DRDataset, APTOSDataset, SICAPv2Dataset
+from utils import mkdir_if_missing, Logger
+from dataloader import get_concat_dataloader
+from torchvision import transforms
+from models.resnet_REDL import *
+#from models.densenet import *
+from torchvision.transforms import InterpolationMode
+import torch.nn.functional as F
+from loss import dkd_no_labels_loss, dkd_loss
+from tensorboardX import SummaryWriter
+from datetime import datetime
+
+def write_scalars(writer, scalars, names, n_iter, tag=None):
+    for scalar, name in zip(scalars, names):
+        if tag is not None:
+            name = '/'.join([tag, name])
+        writer.add_scalar(name, scalar, n_iter)
+def init_writer(opts):
+    """ Tensorboard writer initialization
+        """
+    # if not os.path.exists(opts.save_folder):
+    #     os.makedirs(opts.save_folder, exist_ok=True)
+
+    if opts.exp_name == 'test':
+        log_path = os.path.join(opts.save_log, opts.exp_name)
+    else:
+        log_path = os.path.join(opts.save_log,
+                                datetime.now().strftime(
+                                    '%b%d_%H-%M-%S') + '_' + opts.model + '_' + opts.dataset + '_' + opts.exp_name)
+    # log_config_path = os.path.join(log_path, 'configs.log')
+
+    writer = SummaryWriter(log_path)
+    return writer
+
+_model_dict = {
+    'resnet18': resnet18,
+    'resnet34': resnet34,
+    'resnet50': resnet50,
+    #'densenet121': densenet121
+}
+
+# 设置超参数
+alpha = 1
+beta = 8
+temperature = 4
+
+# 计算熵（不确定性正则化）
+def compute_entropy(probabilities):
+    # 计算每个样本的熵
+    return -torch.sum(probabilities * torch.log(probabilities + 1e-6), dim=1)  # 加上一个小常数避免log(0)
+# 熵正则化项
+def entropy_regularization(probabilities, lambda_entropy=0.1):
+    entropy = compute_entropy(probabilities)
+    return lambda_entropy * torch.mean(entropy)
+
+def get_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_root", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/data')
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--model", type=str, default='resnet18')
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--gpu_id", type=str, default='4')
+    parser.add_argument("--random_seed", type=int, default=1337)
+    parser.add_argument("--download", action='store_true', default=False)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--cfl_lr", type=float, default=None)
+
+    parser.add_argument("--t1_ckpt", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/results/baselines/resnet50_sicap0123_max_acc_ce_notran.pth')
+    parser.add_argument("--t2_ckpt", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/results/baselines/resnet50_1_sicap0123_max_acc_ce_notran.pth')
+    # parser.add_argument("--t1_ckpt", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/results/baselines/resnet50_aptos01234_max_acc_ce_notran.pth')
+    # parser.add_argument("--t2_ckpt", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/results/baselines/resnet50_1_aptos01234_max_acc_ce_notran.pth')
+    parser.add_argument("--dataset", type=str, default='sicap0123',
+                        choices=['dogs', 'cub200', 'dr012', 'dr34', 'dr01234', 'aptos01234', 'sicap0123'])
+    
+    parser.add_argument('--exp_name', type=str, help='Experiment name', default='train')
+    parser.add_argument('--save_log', default='/data4/tongshuo/Grading/CommonFeatureLearning/save_logs/REDL_logs/',help='Path to save checkpoint models')
+
+    return parser
+
+def amal(cur_epoch, step_counter, criterion, criterion_ce, criterion_cf, model, cfl_blk, teachers, optim, train_loader, device,  writer, scheduler=None, print_interval=5):
+    """Train and return epoch loss"""
+    t1, t2 = teachers
+    #if scheduler is not None:
+    #    scheduler.step()
+
+    print("Epoch %d, lr = %f" % (cur_epoch, optim.param_groups[0]['lr']))
+    avgmeter = AverageMeter()
+    #is_densenet = isinstance(model, DenseNet)
+    is_densenet = False
+    for cur_step, (images, labels) in enumerate(train_loader):
+
+        images = images.to(device, dtype=torch.float32)
+        labels = labels.to(device, dtype=torch.long)
+
+        # get soft-target logits
+        optim.zero_grad()
+        with torch.no_grad():
+            # t1_out = t1(images)
+            # t2_out = t2(images)
+            t1_out, uc1 = t1(images, uncertainty_type='max_modified_prob', lamb1=1.0, lamb2=0.1, score_norm=False)
+            t2_out, uc2 = t2(images, uncertainty_type='max_modified_prob', lamb1=1.0, lamb2=0.1, score_norm=False)
+            print(100*'#')
+            print(uc1, uc2)
+            # t_outs = torch.cat((t1_out, t2_out), dim=1)
+            uc_mean = (uc1 + uc2) / 2.0
+            print(100*'^')
+            print(uc_mean)
+            # 使用 torch.stack 合并张量，形状为 2x5
+            stacked_output = torch.stack((t1_out, t2_out), dim=0)
+            # 求沿第0维的均值，得到形状为 1x5 的张量
+            t_outs = torch.mean(stacked_output, dim=0)
+            # t_outs = F.softmax(t_outs, dim=1)
+
+            ft1 = t1.layer4.output
+            ft2 = t2.layer4.output
+
+        # get student output
+        s_outs, ucs = model(images)
+        if is_densenet:
+            fs = model.features.output
+        else:
+            fs = model.layer4.output
+
+        ft = [ft1, ft2]
+
+        (hs, ht), (ft_, ft) = cfl_blk(fs, ft)
+
+        # 计算熵正则化项
+        # entropy_loss = entropy_regularization(t_outs)
+        loss_1 = criterion(s_outs, labels)  #输出与真实标签之间计算损失
+        # loss_ce = criterion_ce(s_outs, t_outs) #软目标损失
+########将损失替换为SHIKE_DKD_loss#######
+        loss_tckd, loss_nckd = dkd_loss(s_outs, t_outs, labels, alpha, beta, temperature)
+########对对齐损失进行限制，通过不确定性进行限制#######
+        loss_cf = 10*criterion_cf(hs, ht, ft_, ft) #MMD和重构损失
+        loss_ce = (uc_mean * loss_tckd) + loss_nckd
+        # loss = loss_ce + loss_cf
+        # loss = loss_1 + loss_ce + loss_cf
+########对整体损失进行限制，通过不确定性进行限制#######
+        loss = (1 + uc_mean) * loss_1 + uc_mean * loss_tckd + loss_nckd + loss_cf
+####################################################
+        # scalars = [loss_1.item(), loss_tckd.item(), loss_nckd.item(), loss_cf.item()]
+        # names = ['loss_1', 'loss_tckd', 'loss_nckd', 'loss_cf']
+        # write_scalars(writer, scalars, names, step_counter, 'train')  
+        # print(step_counter)
+        step_counter += 1
+####################################################   
+        loss.backward()
+        optim.step()
+
+        avgmeter.update('loss', loss.item())
+        avgmeter.update('interval loss', loss.item())
+        avgmeter.update('tckd loss', (uc_mean * loss_tckd).item())
+        avgmeter.update('nckd loss', loss_nckd.item())
+        avgmeter.update('ce loss', loss_ce.item())
+        avgmeter.update('cf loss', loss_cf.item())
+        
+        if (cur_step+1) % print_interval == 0:
+            interval_loss = avgmeter.get_results('interval loss')
+            ce_loss = avgmeter.get_results('ce loss')
+            cf_loss = avgmeter.get_results('cf loss')
+            acc = accuracy(s_outs, labels)
+            mae = MAE(s_outs, labels)
+            print("Epoch %d, Batch %d/%d, Loss=%f (ce=%f, cf=%s), Acc=%f, MAE=%f"  %
+                  (cur_epoch, cur_step+1, len(train_loader), interval_loss, ce_loss, cf_loss, acc, mae))
+            avgmeter.reset('interval loss')
+            avgmeter.reset('ce loss')
+            avgmeter.reset('cf loss')
+    if scheduler is not None:
+        scheduler.step()
+    # return avgmeter.get_results('loss')
+    return step_counter
+
+def validate(model, loader, device, metrics):
+    """Do validation and return specified samples"""
+    metrics.reset()
+    total_logit = []
+    total_target = []
+    with torch.no_grad():
+        for i, (images, labels) in tqdm(enumerate(loader)):
+
+            images = images.to(device, dtype=torch.float32)
+            labels = labels.to(device, dtype=torch.long)
+
+            outputs, _ = model(images)
+            preds = outputs.detach()  # .max(dim=1)[1].cpu().numpy()
+            targets = labels  # .cpu().numpy()
+            if i == 0:
+                total_logit = preds
+                total_target = targets
+            else:
+                total_logit = torch.cat([total_logit, preds], dim=0)
+                total_target = torch.cat([total_target, targets], 0)
+            metrics.update(preds, targets)
+        score = metrics.get_results()
+        mae = MAE(total_logit, total_target)
+        score['MAE'] = mae
+        dic_data, measure_result = specific_eval(total_logit, total_target)
+        val_f1 = dic_data["macro avg"]["f1-score"]
+        val_recall = dic_data["macro avg"]["recall"]
+        val_precision = dic_data["macro avg"]["precision"]
+    return score, val_f1, val_recall, val_precision, measure_result
+
+
+def main():
+    opts = get_parser().parse_args()
+    os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_id
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Set up random seed
+    mkdir_if_missing('checkpoints')
+    mkdir_if_missing('logs')
+    sys.stdout = Logger(os.path.join('logs', 'amal_%s.txt'%(opts.model)))
+    print(opts)
+    torch.manual_seed(opts.random_seed)
+    torch.cuda.manual_seed(opts.random_seed)
+    np.random.seed(opts.random_seed)
+    random.seed(opts.random_seed)
+
+    if opts.dataset == 'aptos01234':
+        dataset = APTOSDataset
+        num_classes = 5
+    elif opts.dataset == 'sicap0123':
+        dataset = SICAPv2Dataset
+        num_classes = 4
+
+    cur_epoch = 0
+    max_acc = 0.0
+    min_mae = 1000
+
+    mkdir_if_missing('checkpoints')
+    max_acc_ckpt = '/data4/tongshuo/Grading/CommonFeatureLearning/results/student/REDL/%s_%s_max_acc_ce_DKD_50_50_18_notran_nopt_REDL.pth'%(opts.model, opts.dataset)
+    min_mae_ckpt = '/data4/tongshuo/Grading/CommonFeatureLearning/results/student/REDL/%s_%s_min_mae_ce_DKD_50_50_18_notran_nopt_REDL.pth'%(opts.model, opts.dataset)
+    #  Set up dataloader
+    #train_loader, val_loader = get_concat_dataloader(data_root=opts.data_root, batch_size=opts.batch_size, download=opts.download)
+    tran = transforms.Compose([
+            transforms.Resize((256, 256), interpolation=InterpolationMode.BILINEAR),
+            transforms.RandomResizedCrop(224, scale=(0.08, 1.)),
+            # transforms.RandomApply([
+            #     transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            # ], p=0.8),
+            # transforms.RandomGrayscale(p=0.2),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+        ])
+    train_data = dataset(None,None,'train',tran,0)
+    val_data = dataset(None,None,'valid',tran,0)
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_size, shuffle=True, drop_last=True)
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=opts.batch_size, shuffle=False, drop_last=True)
+
+    # pretrained teachers
+    # t1_model_name = 'resnet18'
+    # t1 = _model_dict[t1_model_name](num_classes=3).to(device) 
+    t1_model_name = 'resnet50'
+    t1 = _model_dict[t1_model_name](num_classes=num_classes).to(device)
+    # t2_model_name = 'resnet18'
+    # t2 = _model_dict[t2_model_name](num_classes=2).to(device)
+    t2_model_name = 'resnet50'
+    t2 = _model_dict[t2_model_name](num_classes=num_classes).to(device)
+    #t1_model_name = opts.t1_ckpt.split('/')[1].split('_')[1] 
+    #t1 = _model_dict[t1_model_name](num_classes=200).to(device) # cub200
+    #t2_model_name = opts.t2_ckpt.split('/')[1].split('_')[1]  
+    #t2 = _model_dict[t2_model_name](num_classes=120).to(device) # dogs
+    print("Loading pretrained teachers ...\nT1: %s, T2: %s"%(t1_model_name, t2_model_name))
+    t1.load_state_dict(torch.load(opts.t1_ckpt)['model_state'])
+    t2.load_state_dict(torch.load(opts.t2_ckpt)['model_state'])
+    t1.eval()
+    t2.eval()
+    print("Target student: %s"%opts.model)
+    #stu = _model_dict[opts.model](pretrained=True, num_classes=120+200).to(device)
+    #metrics = StreamClsMetrics(120+200)
+#################################################no_pretrained########################################
+    stu = _model_dict[opts.model](pretrained=False, num_classes=num_classes).to(device)
+    metrics = StreamClsMetrics(num_classes)
+
+    # Setup Common Feature Blocks
+    t1_feature_dim = t1.fc.in_features #512
+    t2_feature_dim = t2.fc.in_features #512
+
+    is_densenet = True if 'densenet' in opts.model else False
+
+    if is_densenet:
+        stu_feature_dim = stu.classifier.in_features
+    else:
+        stu_feature_dim = stu.fc.in_features #512
+    
+    cfl_blk = CFL_ConvBlock(stu_feature_dim, [t1_feature_dim, t2_feature_dim], 128).to(device)
+
+    def forward_hook(module, input, output):
+        module.output = output # keep feature maps
+
+    t1.layer4.register_forward_hook(forward_hook)
+    t2.layer4.register_forward_hook(forward_hook)
+
+    if is_densenet:
+        stu.features.register_forward_hook(forward_hook)
+    else:
+        stu.layer4.register_forward_hook(forward_hook)
+
+    params_1x = []
+    params_10x = []
+    for name, param in stu.named_parameters():
+        if 'fc' in name:
+            params_10x.append(param)
+        else:
+            params_1x.append(param)
+
+    cfl_lr = opts.lr*10 if opts.cfl_lr is None else opts.cfl_lr
+    optimizer = torch.optim.Adam([{'params': params_1x,             'lr': opts.lr},
+                                  {'params': params_10x,            'lr': opts.lr*10},
+                                  {'params': cfl_blk.parameters(),  'lr': cfl_lr} ],
+                                 lr=opts.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, step_size=15, gamma=0.1)
+
+    # Loss
+    criterion = nn.CrossEntropyLoss(reduction='mean')
+    criterion_ce = SoftCELoss(T=1.0)
+    criterion_cf = CFLoss(normalized=True)
+
+    def save_ckpt(path):
+        """ save current model
+        """
+        state = {
+            "epoch": cur_epoch,
+            "model_state": stu.state_dict(),
+            "cfl_state": cfl_blk.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "max_acc": max_acc,
+            "min_mae": min_mae
+        }
+        torch.save(state, path)
+        print("Model saved as %s" % path)
+####################################################     
+    writer =  init_writer(opts)
+####################################################     
+    print("Training ...")
+    # ===== Train Loop =====#
+    step_counter = 0  # 初始化步数计数器
+    while cur_epoch < opts.epochs:
+        stu.train()
+        step_counter = amal(cur_epoch=cur_epoch,
+                            step_counter = step_counter,
+                            criterion=criterion,
+                            criterion_ce=criterion_ce,
+                            criterion_cf=criterion_cf,
+                            model=stu,
+                            cfl_blk=cfl_blk,
+                            teachers=[t1, t2],
+                            optim=optimizer,
+                            train_loader=train_loader,
+                            device=device,
+                            writer=writer,
+                            scheduler=scheduler)
+        # print("End of Epoch %d/%d, Average Loss=%f" %
+        #      (cur_epoch, opts.epochs, epoch_loss))
+
+        # =====  Latest Checkpoints  =====
+        # save_ckpt(latest_ckpt)
+        # =====  Validation  =====
+        print("validate on val set...")
+        stu.eval()
+        val_score, val_f1, val_recall, val_precision, measure_result  = validate(model=stu,
+                             loader=val_loader,
+                             device=device,
+                             metrics=metrics)
+        print("Confusion Matrix:\n",val_score['Confusion Matrix'])
+        print(metrics.to_str(val_score))
+        score_path = '/data4/tongshuo/Grading/CommonFeatureLearning/results/student/REDL/%s_%s_score_student_ce_DKD_50_50_18_notran_nopt_REDL.txt'%(opts.model, opts.dataset)
+        score_best_path = '/data4/tongshuo/Grading/CommonFeatureLearning/results/student/REDL/%s_%s_score_student_best_ce_DKD_50_50_18_notran_nopt_REDL.txt'%(opts.model, opts.dataset)
+       
+        with open(score_path, mode='a') as f:
+            f.write("Confusion Matrix:\n")
+            f.write(str(val_score['Confusion Matrix']) + "\n") 
+            f.write(str(measure_result) + "\n")  
+            f.write(metrics.to_str(val_score)+ "\n")
+        sys.stdout.flush()
+        # =====  Save Best Model  =====
+        if val_score['Overall Acc'] > max_acc:  # save best model
+            max_acc = val_score['Overall Acc']
+            save_ckpt(max_acc_ckpt)
+
+            with open(score_best_path, mode='a') as f:
+                f.write("Confusion Matrix:\n")
+                f.write(str(val_score['Confusion Matrix']) + "\n") 
+                f.write(str(measure_result) + "\n")
+                f.write(metrics.to_str(val_score))
+
+        if val_score['MAE'] < min_mae:  # save best model
+            min_mae = val_score['MAE']
+            save_ckpt(min_mae_ckpt)
+
+            with open(score_best_path, mode='a') as f:
+                f.write("Confusion Matrix:\n")
+                f.write(str(val_score['Confusion Matrix']) + "\n")   
+                f.write(str(measure_result) + "\n")
+                f.write(metrics.to_str(val_score))
+        cur_epoch += 1
+
+if __name__ == '__main__':
+    main()
