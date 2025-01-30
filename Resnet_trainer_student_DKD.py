@@ -86,14 +86,7 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, model, cfl_blk, teach
         with torch.no_grad():
             t1_out = t1(images)
             t2_out = t2(images)
-            #print('labels:', labels[:10])
-            #print('t1_out:', t1_out[:10])
-            #print('t2_out:', t2_out[:10])
-            # t_outs = torch.cat((t1_out, t2_out), dim=1)
-            # 使用 torch.stack 合并张量，形状为 2x5
             stacked_output = torch.stack((t1_out, t2_out), dim=0)
-
-            # 求沿第0维的均值，得到形状为 1x5 的张量
             t_outs = torch.mean(stacked_output, dim=0)
             # t_outs = F.softmax(t_outs, dim=1)
 
@@ -115,12 +108,10 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, model, cfl_blk, teach
         # entropy_loss = entropy_regularization(t_outs)
         loss_1 = criterion(s_outs, labels)  #输出与真实标签之间计算损失
         # loss_ce = criterion_ce(s_outs, t_outs) #软目标损失
-########将损失替换为SHIKE_DKD_loss#######
         loss_tckd, loss_nckds = dkd_loss(s_outs, t_outs, labels, alpha, beta, temperature)
         loss_ce = loss_tckd + loss_nckds
         loss_cf = 10*criterion_cf(hs, ht, ft_, ft) #MMD和重构损失
         
-        # loss = loss_ce + loss_cf
         loss = loss_1 + loss_ce + loss_cf
         loss.backward()
         optim.step()
