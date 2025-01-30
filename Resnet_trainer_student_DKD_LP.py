@@ -62,15 +62,6 @@ class LowPassModule(nn.Module):
         
         return self.relu(bottle)
 
-# 计算熵（不确定性正则化）
-def compute_entropy(probabilities):
-    # 计算每个样本的熵
-    return -torch.sum(probabilities * torch.log(probabilities + 1e-6), dim=1)  # 加上一个小常数避免log(0)
-# 熵正则化项
-def entropy_regularization(probabilities, lambda_entropy=0.1):
-    entropy = compute_entropy(probabilities)
-    return lambda_entropy * torch.mean(entropy)
-
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/data')
@@ -113,15 +104,12 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, criterion_cf_LP, t1_l
         with torch.no_grad():
             t1_out = t1(images)
             t2_out = t2(images)
-            # t_outs = torch.cat((t1_out, t2_out), dim=1)
-            # 使用 torch.stack 合并张量，形状为 2x5
             stacked_output = torch.stack((t1_out, t2_out), dim=0)
-            # 求沿第0维的均值，得到形状为 1x5 的张量
             t_outs = torch.mean(stacked_output, dim=0)
             # t_outs = F.softmax(t_outs, dim=1)
 ###############################################################################            
-            ft1_SA = t1.layer4.output
-            ft2_SA = t2.layer4.output
+            ft1_SA = t1.layer1.output
+            ft2_SA = t2.layer1.output
 ###############################################################################
             ft1 = t1.layer4.output
             ft2 = t2.layer4.output
@@ -142,19 +130,14 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, criterion_cf_LP, t1_l
         ft = [ft1, ft2]
         (hs, ht), (ft_, ft) = cfl_blk(fs, ft)
 
-        # 计算熵正则化项
-        # entropy_loss = entropy_regularization(t_outs)
         loss_1 = criterion(s_outs, labels)  #输出与真实标签之间计算损失
         # loss_ce = criterion_ce(s_outs, t_outs) #软目标损失
-########将损失替换为SHIKE_DKD_loss#######
         loss_tckd, loss_nckds = dkd_loss(s_outs, t_outs, labels, alpha, beta, temperature)
         loss_ce = loss_tckd + loss_nckds
         loss_cf = 10*criterion_cf(hs, ht, ft_, ft) #MMD和重构损失
-        # loss_cf_LP = 10*criterion_cf_LP(hs_LP, ht_LP) #浅层特征的MMD损失,没有重构损失
+        loss_cf_LP = 10*criterion_cf_LP(hs_LP, ht_LP) #浅层特征的MMD损失,没有重构损失
 ################把之前的MMD损失替换为欧氏距离##################      
-        print(hs_LP.shape, ht_LP.shape)
-        loss_cf_LP = euclidean_loss(hs_LP, ht_LP)
-        print('loss_cf_LP:', loss_cf_LP)
+        # loss_cf_LP = euclidean_loss(hs_LP, ht_LP)
         # loss = loss_ce + loss_cf
         # loss = loss_1 + loss_ce + loss_cf
         loss = loss_1 + loss_ce + loss_cf + loss_cf_LP
@@ -303,28 +286,25 @@ def main():
         stu.layer4.register_forward_hook(forward_hook)
 ##########################################################################################################
 ###############添加浅层的MMD损失###################
-    # t1_feature_dim_SA = t1.layer3[0].conv1.in_channels #256
-    # t2_feature_dim_SA = t2.layer3[0].conv1.in_channels #256
-    t1_feature_dim_SA = t1.fc.in_features #512
-    t2_feature_dim_SA = t2.fc.in_features #512
+    t1_feature_dim_SA = t1.layer2[0].conv1.in_channels #256
+    t2_feature_dim_SA = t2.layer2[0].conv1.in_channels #256
     t1_low_pass = LowPassModule(in_channel = t1_feature_dim_SA)
     t2_low_pass = LowPassModule(in_channel = t2_feature_dim_SA)
     is_densenet = True if 'densenet' in opts.model else False
     if is_densenet:
         stu_feature_dim_SA = stu.classifier.in_features
     else:
-        # stu_feature_dim_SA = stu.layer3[0].conv1.in_channels #64
-        stu_feature_dim_SA = stu.fc.in_features #512
+        stu_feature_dim_SA = stu.layer2[0].conv1.in_channels #64
 
     cfl_blk_SA = CFL_ConvBlock(stu_feature_dim_SA, [t1_feature_dim_SA, t2_feature_dim_SA], 128).to(device)
     def forward_hook(module, input, output):
         module.output = output # keep feature maps
-    t1.layer4.register_forward_hook(forward_hook)
-    t2.layer4.register_forward_hook(forward_hook)
+    t1.layer1.register_forward_hook(forward_hook)
+    t2.layer1.register_forward_hook(forward_hook)
     if is_densenet:
         stu.features.register_forward_hook(forward_hook)
     else:
-        stu.layer4.register_forward_hook(forward_hook)
+        stu.layer1.register_forward_hook(forward_hook)
 ##########################################################################################################
     params_1x = []
     params_10x = []
