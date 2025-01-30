@@ -16,7 +16,7 @@ Teacher Model   |        Code     |    num_classes
 ResNet50        |   resnet_linear_dr.py        |     眼底5 / 前列腺4             
 ResNet50        |   resnet_linear_dr.py        |     眼底5 / 前列腺4          
 
-### Student Performance (CUB200+StanfordDogs)
+### Student Performance 
 Target Model    |     Code       |      Methids 
 :--------------:|:-----------:|:-------------------:
 ResNet18        |   Resnet_trainer_student.py    |      common feature learning
