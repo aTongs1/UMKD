@@ -145,15 +145,6 @@ class SPP_LPModule(nn.Module):
         priors = [F.upsample(input=self.stages[i](feats), size=(h, w), mode='bilinear') for i in range(4)] # 对每个部分应用 stages[i]，即进行自适应池化后，再通过双线性插值将其上采样至输入图像的原始大小。
         return self.relu(priors[0]), self.relu(priors[1]), self.relu(priors[2]), self.relu(priors[3]) # 返回四个不同池化尺度的部分
 
-# 计算熵（不确定性正则化）
-def compute_entropy(probabilities):
-    # 计算每个样本的熵
-    return -torch.sum(probabilities * torch.log(probabilities + 1e-6), dim=1)  # 加上一个小常数避免log(0)
-# 熵正则化项
-def entropy_regularization(probabilities, lambda_entropy=0.1):
-    entropy = compute_entropy(probabilities)
-    return lambda_entropy * torch.mean(entropy)
-
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/data')
@@ -197,9 +188,7 @@ def amal(cur_epoch, criterion, criterion_ce, criterion_cf, criterion_cf_LP, t1_l
             t1_out = t1(images)
             t2_out = t2(images)
             # t_outs = torch.cat((t1_out, t2_out), dim=1)
-            # 使用 torch.stack 合并张量，形状为 2x5
             stacked_output = torch.stack((t1_out, t2_out), dim=0)
-            # 求沿第0维的均值，得到形状为 1x5 的张量
             t_outs = torch.mean(stacked_output, dim=0)
             # t_outs = F.softmax(t_outs, dim=1)
 ###############################################################################            
