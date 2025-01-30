@@ -34,15 +34,6 @@ alpha = 1
 beta = 8
 temperature = 4
 
-# 计算熵（不确定性正则化）
-def compute_entropy(probabilities):
-    # 计算每个样本的熵
-    return -torch.sum(probabilities * torch.log(probabilities + 1e-6), dim=1)  # 加上一个小常数避免log(0)
-# 熵正则化项
-def entropy_regularization(probabilities, lambda_entropy=0.1):
-    entropy = compute_entropy(probabilities)
-    return lambda_entropy * torch.mean(entropy)
-
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/data')
