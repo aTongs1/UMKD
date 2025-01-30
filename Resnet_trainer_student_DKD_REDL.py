@@ -61,15 +61,6 @@ alpha = 1
 beta = 8
 temperature = 4
 
-# 计算熵（不确定性正则化）
-def compute_entropy(probabilities):
-    # 计算每个样本的熵
-    return -torch.sum(probabilities * torch.log(probabilities + 1e-6), dim=1)  # 加上一个小常数避免log(0)
-# 熵正则化项
-def entropy_regularization(probabilities, lambda_entropy=0.1):
-    entropy = compute_entropy(probabilities)
-    return lambda_entropy * torch.mean(entropy)
-
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default='/data4/tongshuo/Grading/CommonFeatureLearning/data')
@@ -116,15 +107,10 @@ def amal(cur_epoch, step_counter, criterion, criterion_ce, criterion_cf, model, 
             # t2_out = t2(images)
             t1_out, uc1 = t1(images, uncertainty_type='max_modified_prob', lamb1=1.0, lamb2=0.1, score_norm=False)
             t2_out, uc2 = t2(images, uncertainty_type='max_modified_prob', lamb1=1.0, lamb2=0.1, score_norm=False)
-            print(100*'#')
-            print(uc1, uc2)
             # t_outs = torch.cat((t1_out, t2_out), dim=1)
-            uc_mean = (uc1 + uc2) / 2.0
-            print(100*'^')
-            print(uc_mean)
+            uc_mean = (uc1 + uc2) / 2.0) # 集中在1.1-1.8
             # 使用 torch.stack 合并张量，形状为 2x5
             stacked_output = torch.stack((t1_out, t2_out), dim=0)
-            # 求沿第0维的均值，得到形状为 1x5 的张量
             t_outs = torch.mean(stacked_output, dim=0)
             # t_outs = F.softmax(t_outs, dim=1)
 
@@ -146,22 +132,20 @@ def amal(cur_epoch, step_counter, criterion, criterion_ce, criterion_cf, model, 
         # entropy_loss = entropy_regularization(t_outs)
         loss_1 = criterion(s_outs, labels)  #输出与真实标签之间计算损失
         # loss_ce = criterion_ce(s_outs, t_outs) #软目标损失
-########将损失替换为SHIKE_DKD_loss#######
         loss_tckd, loss_nckd = dkd_loss(s_outs, t_outs, labels, alpha, beta, temperature)
-########对对齐损失进行限制，通过不确定性进行限制#######
+########对对齐损失进行限制，通过不确定性进行限制，后面觉得没必要去掉了#######
         loss_cf = 10*criterion_cf(hs, ht, ft_, ft) #MMD和重构损失
         loss_ce = (uc_mean * loss_tckd) + loss_nckd
         # loss = loss_ce + loss_cf
         # loss = loss_1 + loss_ce + loss_cf
-########对整体损失进行限制，通过不确定性进行限制#######
+########对整体损失进行限制，通过不确定性进行限制###########################################################
         loss = (1 + uc_mean) * loss_1 + uc_mean * loss_tckd + loss_nckd + loss_cf
-####################################################
+########################################################################################################
         # scalars = [loss_1.item(), loss_tckd.item(), loss_nckd.item(), loss_cf.item()]
         # names = ['loss_1', 'loss_tckd', 'loss_nckd', 'loss_cf']
         # write_scalars(writer, scalars, names, step_counter, 'train')  
         # print(step_counter)
         step_counter += 1
-####################################################   
         loss.backward()
         optim.step()
 
