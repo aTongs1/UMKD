@@ -15,8 +15,12 @@ ResNet50        |   resnet_linear_dr.py        |     5/4
 ResNet50        |   resnet_linear_dr.py        |     5/4             
 
 ### Student Performance (CUB200+StanfordDogs)
-Target Model    |    KD       |       CFL   
+Target Model    |     Code       |      Methids 
 :--------------:|:-----------:|:-------------------:
-ResNet34        |   0.7684    |      **0.7721**
-ResNet50        |   0.7965    |      **0.7997** 
-DenseNet121     |   0.7769    |      **0.7815**
+ResNet18        |   Resnet_trainer_student.py    |      common feature learning
+ResNet18        |   Resnet_trainer_student_DKD.py    |      common feature learning + DKD 
+ResNet18        |   Resnet_trainer_student_SDD.py    |      common feature learning + SDD  
+ResNet18        |   Resnet_trainer_student_DKD_LP.py    |      common feature learning + DKD + LowPass  
+ResNet18        |   Resnet_trainer_student_DKD_REDL.py    |      common feature learning + DKD + REDL  
+ResNet18        |   Resnet_trainer_student_DKD_SA.py    |      common feature learning + DKD + ShallowAlign  
+ResNet18        |   Resnet_trainer_student_DKD_SPP.py    |      common feature learning + DKD + SPP  
