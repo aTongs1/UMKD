@@ -1,5 +1,5 @@
 # UMKD
-
+Code for the paper "[Uncertainty-Aware Multi-Expert Knowledge Distillation for Imbalanced Disease Grading](https://arxiv.org/abs/2505.00592)", published in MICCAI-2025.
 ## Datasets
 
 Dataset   |        URL       
